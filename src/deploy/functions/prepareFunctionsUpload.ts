@@ -99,6 +99,12 @@ async function packageSource(
         name: CONFIG_DEST_FILE,
         mode: 420 /* 0o644 */,
       });
+
+      // Only warn about deprecated runtime config if there are user-defined values
+      // (i.e., keys other than the default 'firebase' key)
+      if (Object.keys(runtimeConfig).some((k) => k !== "firebase")) {
+        functionsConfig.logFunctionsConfigDeprecationWarning();
+      }
     }
     await pipeAsync(archive, fileStream);
   } catch (err: any) {

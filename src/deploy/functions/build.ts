@@ -1,10 +1,9 @@
 import * as backend from "./backend";
 import * as proto from "../../gcp/proto";
-import * as api from "../../.../../api";
+import * as api from "../../api";
 import * as params from "./params";
 import { FirebaseError } from "../../error";
 import { assertExhaustive, mapObject, nullsafeVisitor } from "../../functional";
-import { UserEnvsOpts, writeUserEnvs } from "../../functions/env";
 import { FirebaseConfig } from "./args";
 import { Runtime } from "./runtimes/supported";
 import { ExprParseError } from "./cel";
@@ -69,13 +68,14 @@ type ServiceAccount = string;
 export interface HttpsTrigger {
   // Which service account should be able to trigger this function. No value means "make public
   // on create and don't do anything on update." For more, see go/cf3-http-access-control
-  invoker?: Array<ServiceAccount | Expression<ServiceAccount>> | null;
+  invoker?: Array<ServiceAccount | Expression<string>> | null;
 }
 
 // Trigger definitions for RPCs servers using the HTTP protocol defined at
 // https://firebase.google.com/docs/functions/callable-reference
-// eslint-disable-next-line
-interface CallableTrigger {}
+interface CallableTrigger {
+  genkitAction?: string;
+}
 
 // Trigger definitions for endpoints that should be called as a delegate for other operations.
 // For example, before user login.
@@ -107,7 +107,7 @@ export interface EventTrigger {
   // requires the EventArc P4SA to be granted the "ActAs" permission to this service account and
   // will cause the "invoker" role to be granted to this service account on the endpoint
   // (Function or Route)
-  serviceAccount?: ServiceAccount | null;
+  serviceAccount?: ServiceAccount | Expression<string> | null;
 
   // The name of the channel where the function receives events.
   // Must be provided to receive CF3v2 custom events.
@@ -207,7 +207,8 @@ export interface SecretEnvVar {
 export type MemoryOption = 128 | 256 | 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768;
 const allMemoryOptions: MemoryOption[] = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
 
-export type FunctionsPlatform = backend.FunctionsPlatform;
+// Run is an automatic migration from gcfv2 and is not used on the wire.
+export type FunctionsPlatform = Exclude<backend.FunctionsPlatform, "run">;
 export const AllFunctionsPlatforms: FunctionsPlatform[] = ["gcfv1", "gcfv2"];
 export type VpcEgressSetting = backend.VpcEgressSettings;
 export const AllVpcEgressSettings: VpcEgressSetting[] = ["PRIVATE_RANGES_ONLY", "ALL_TRAFFIC"];
@@ -232,7 +233,7 @@ export type Endpoint = Triggered & {
   // The services account that this function should run as.
   // defaults to the GAE service account when a function is first created as a GCF gen 1 function.
   // Defaults to the compute service account when a function is first created as a GCF gen 2 function.
-  serviceAccount?: Field<string> | ServiceAccount | null;
+  serviceAccount?: ServiceAccount | Expression<string> | null;
 
   // defaults to ["us-central1"], overridable in firebase-tools with
   //  process.env.FIREBASE_FUNCTIONS_DEFAULT_REGION
@@ -282,22 +283,19 @@ export type DynamicExtension = {
 interface ResolveBackendOpts {
   build: Build;
   firebaseConfig: FirebaseConfig;
-  userEnvOpt: UserEnvsOpts;
   userEnvs: Record<string, string>;
   nonInteractive?: boolean;
   isEmulator?: boolean;
 }
 
 /**
- * Resolves user-defined parameters inside a Build, and generates a Backend.
- * Returns both the Backend and the literal resolved values of any params, since
- * the latter also have to be uploaded so user code can see them in process.env
+ * Resolves user-defined parameters inside a Build and generates a Backend.
+ * Callers are responsible for persisting resolved env vars.
  */
 export async function resolveBackend(
   opts: ResolveBackendOpts,
 ): Promise<{ backend: backend.Backend; envs: Record<string, params.ParamValue> }> {
-  let paramValues: Record<string, params.ParamValue> = {};
-  paramValues = await params.resolveParams(
+  const paramValues = await params.resolveParams(
     opts.build.params,
     opts.firebaseConfig,
     envWithTypes(opts.build.params, opts.userEnvs),
@@ -305,20 +303,13 @@ export async function resolveBackend(
     opts.isEmulator,
   );
 
-  const toWrite: Record<string, string> = {};
-  for (const paramName of Object.keys(paramValues)) {
-    const paramValue = paramValues[paramName];
-    if (Object.prototype.hasOwnProperty.call(opts.userEnvs, paramName) || paramValue.internal) {
-      continue;
-    }
-    toWrite[paramName] = paramValue.toString();
-  }
-  writeUserEnvs(toWrite, opts.userEnvOpt);
-
   return { backend: toBackend(opts.build, paramValues), envs: paramValues };
 }
 
 // Exported for testing
+/**
+ *
+ */
 export function envWithTypes(
   definedParams: params.Param[],
   rawEnvs: Record<string, string>,
@@ -495,6 +486,7 @@ export function toBackend(
         "labels",
         "secretEnvironmentVariables",
       );
+      r.resolveStrings(bkEndpoint, bdEndpoint, "serviceAccount");
 
       proto.convertIfPresent(bkEndpoint, bdEndpoint, "ingressSettings", (from) => {
         if (from !== null && !backend.AllIngressSettings.includes(from)) {
@@ -568,7 +560,9 @@ function discoverTrigger(endpoint: Endpoint, region: string, r: Resolver): backe
     }
     return { httpsTrigger };
   } else if (isCallableTriggered(endpoint)) {
-    return { callableTrigger: {} };
+    const trigger: CallableTriggered = { callableTrigger: {} };
+    proto.copyIfPresent(trigger.callableTrigger, endpoint.callableTrigger, "genkitAction");
+    return trigger;
   } else if (isBlockingTriggered(endpoint)) {
     return { blockingTrigger: endpoint.blockingTrigger };
   } else if (isEventTriggered(endpoint)) {
@@ -645,4 +639,42 @@ function discoverTrigger(endpoint: Endpoint, region: string, r: Resolver): backe
     return { taskQueueTrigger };
   }
   assertExhaustive(endpoint);
+}
+
+/**
+ * Prefixes all endpoint IDs and secret names in a build with a given prefix.
+ * This ensures that functions and their associated secrets from different codebases
+ * remain isolated and don't conflict when deployed to the same project.
+ */
+export function applyPrefix(build: Build, prefix: string): void {
+  if (!prefix) {
+    return;
+  }
+  const newEndpoints: Record<string, Endpoint> = {};
+  for (const [id, endpoint] of Object.entries(build.endpoints)) {
+    const newId = `${prefix}-${id}`;
+
+    // Enforce function id constraints early for clearer errors.
+    if (newId.length > 63) {
+      throw new FirebaseError(
+        `Function id '${newId}' exceeds 63 characters after applying prefix '${prefix}'. Please shorten the prefix or function name.`,
+      );
+    }
+    const fnIdRegex = /^[a-zA-Z][a-zA-Z0-9_-]{0,62}$/;
+    if (!fnIdRegex.test(newId)) {
+      throw new FirebaseError(
+        `Function id '${newId}' is invalid after applying prefix '${prefix}'. Function names must start with a letter and can contain letters, numbers, underscores, and hyphens, with a maximum length of 63 characters.`,
+      );
+    }
+
+    newEndpoints[newId] = endpoint;
+
+    if (endpoint.secretEnvironmentVariables) {
+      endpoint.secretEnvironmentVariables = endpoint.secretEnvironmentVariables.map((secret) => ({
+        ...secret,
+        secret: `${prefix}-${secret.secret}`,
+      }));
+    }
+  }
+  build.endpoints = newEndpoints;
 }

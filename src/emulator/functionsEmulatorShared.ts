@@ -106,11 +106,6 @@ export interface FunctionsRuntimeFeatures {
   timeout?: boolean;
 }
 
-export class HttpConstants {
-  static readonly CALLABLE_AUTH_HEADER: string = "x-callable-context-auth";
-  static readonly ORIGINAL_AUTH_HEADER: string = "x-original-auth";
-}
-
 export class EmulatedTrigger {
   /*
   Here we create a trigger from a single definition (data about what resources does this trigger on, etc) and
@@ -509,6 +504,7 @@ export function getSecretLocalPath(backend: EmulatableBackend, projectDir: strin
 export function toBackendInfo(
   e: EmulatableBackend,
   cf3Triggers: ParsedTriggerDefinition[],
+  labels?: Record<string, string>,
 ): BackendInfo {
   const envWithSecrets = Object.assign({}, e.env);
   for (const s of e.secretEnv) {
@@ -540,6 +536,7 @@ export function toBackendInfo(
       extension: e.extension, // Only present on published extensions
       extensionVersion: extensionVersion, // Only present on published extensions
       extensionSpec: extensionSpec, // Only present on local extensions
+      labels,
       functionTriggers:
         // If we don't have predefinedTriggers, this is the CF3 backend.
         e.predefinedTriggers ?? cf3Triggers.filter((t) => t.codebase === e.codebase),

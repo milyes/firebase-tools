@@ -38,6 +38,7 @@ import {
   BlockingFunctionEvents,
 } from "./state";
 import { MfaEnrollments, Schemas } from "./types";
+import { FirebaseError } from "../../error";
 
 /**
  * Create a map from IDs to operations handlers suitable for exegesis.
@@ -300,7 +301,8 @@ function lookup(
       tryAddUser(state.getUserByLocalId(localId));
     }
     for (const email of reqBody.email ?? []) {
-      tryAddUser(state.getUserByEmail(email));
+      const canonicalizedEmail = canonicalizeEmailAddress(email);
+      tryAddUser(state.getUserByEmail(canonicalizedEmail));
     }
     for (const phoneNumber of reqBody.phoneNumber ?? []) {
       tryAddUser(state.getUserByPhoneNumber(phoneNumber));
@@ -1030,11 +1032,7 @@ export function setAccountInfoImpl(
   { privileged = false, emulatorUrl = undefined }: { privileged?: boolean; emulatorUrl?: URL } = {},
 ): Schemas["GoogleCloudIdentitytoolkitV1SetAccountInfoResponse"] {
   // TODO: Implement these.
-  const unimplementedFields: (keyof typeof reqBody)[] = [
-    "provider",
-    "upgradeToFederatedLogin",
-    "linkProviderUserInfo",
-  ];
+  const unimplementedFields: (keyof typeof reqBody)[] = ["provider", "upgradeToFederatedLogin"];
   for (const field of unimplementedFields) {
     if (field in reqBody) {
       throw new NotImplementedError(`${field} is not implemented yet.`);
@@ -1232,8 +1230,16 @@ export function setAccountInfoImpl(
     }
   }
 
+  if (reqBody.linkProviderUserInfo) {
+    assert(reqBody.linkProviderUserInfo.providerId, "MISSING_PROVIDER_ID");
+    assert(reqBody.linkProviderUserInfo.rawId, "MISSING_RAW_ID");
+  }
+
   user = state.updateUserByLocalId(user.localId, updates, {
     deleteProviders: reqBody.deleteProvider,
+    upsertProviders: reqBody.linkProviderUserInfo
+      ? [reqBody.linkProviderUserInfo as ProviderUserInfo]
+      : undefined,
   });
 
   // Only initiate the recover email OOB flow for non-anonymous users
@@ -2215,9 +2221,23 @@ async function mfaSignInFinalize(
   const phoneNumber = verifyPhoneNumber(state, sessionInfo, code);
 
   let { user, signInProvider } = parsePendingCredential(state, reqBody.mfaPendingCredential);
-  const enrollment = user.mfaInfo?.find(
-    (enrollment) => enrollment.unobfuscatedPhoneInfo === phoneNumber,
-  );
+  const enrollment = user.mfaInfo?.find((enrollment) => {
+    // All but firebase-ios-sdk finalize with unobfuscated phone number.
+    if (enrollment.unobfuscatedPhoneInfo === phoneNumber) {
+      return true;
+    }
+
+    // But firebase-ios-sdk finalizes with an obfuscated number. This works against
+    // cloud auth, so emulator should attempt to find enrollment obfuscated as well.
+    if (
+      !!enrollment.unobfuscatedPhoneInfo &&
+      obfuscatePhoneNumber(enrollment.unobfuscatedPhoneInfo) === phoneNumber
+    ) {
+      return true;
+    }
+
+    return false;
+  });
 
   const { updates, extraClaims } = await fetchBlockingFunction(
     state,
@@ -3111,11 +3131,16 @@ async function fetchBlockingFunction(
   let status: number;
   let text: string;
   try {
+    const signal = controller.signal as any;
+    signal.reason = "";
+    signal.throwIfAborted = () => {
+      throw new FirebaseError("Aborted");
+    };
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(reqBody),
-      signal: controller.signal,
+      signal,
     });
     ok = res.ok;
     status = res.status;

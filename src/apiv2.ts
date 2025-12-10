@@ -127,9 +127,12 @@ export function setAccessToken(token = ""): void {
  * @returns An access token
  */
 export async function getAccessToken(): Promise<string> {
-  if (accessToken) {
+  const valid = auth.haveValidTokens(refreshToken, []);
+  const usingADC = !auth.loggedIn();
+  if (accessToken && (valid || usingADC)) {
     return accessToken;
   }
+
   const data = await auth.getAccessToken(refreshToken, []);
   return data.access_token;
 }
@@ -362,7 +365,12 @@ export class Client {
     }
 
     if (options.signal) {
-      fetchOptions.signal = options.signal;
+      const signal = options.signal as any;
+      signal.reason = "";
+      signal.throwIfAborted = () => {
+        throw new FirebaseError("Aborted");
+      };
+      fetchOptions.signal = signal;
     }
 
     let reqTimeout: NodeJS.Timeout | undefined;
@@ -371,7 +379,12 @@ export class Client {
       reqTimeout = setTimeout(() => {
         controller.abort();
       }, options.timeout);
-      fetchOptions.signal = controller.signal;
+      const signal = controller.signal as any;
+      signal.reason = "";
+      signal.throwIfAborted = () => {
+        throw new FirebaseError("Aborted");
+      };
+      fetchOptions.signal = signal;
     }
 
     if (typeof options.body === "string" || isStream(options.body)) {
@@ -462,14 +475,24 @@ export class Client {
         this.logResponse(res, body, options);
 
         if (res.status >= 400) {
+          if (res.status === 401 && this.opts.auth) {
+            // If we get a 401, access token is expired or otherwise invalid.
+            // Throw it away and get a new one. We check for validity before using
+            // tokens, so this should not happen.
+            logger.debug(
+              "Got a 401 Unauthenticated error for a call that required authentication. Refreshing tokens.",
+            );
+            setAccessToken();
+            setAccessToken(await getAccessToken());
+          }
           if (options.retryCodes?.includes(res.status)) {
-            const err = responseToError({ statusCode: res.status }, body) || undefined;
+            const err = responseToError({ statusCode: res.status }, body, fetchURL) || undefined;
             if (operation.retry(err)) {
               return;
             }
           }
           if (!options.resolveOnHTTPError) {
-            return reject(responseToError({ statusCode: res.status }, body));
+            return reject(responseToError({ statusCode: res.status }, body, fetchURL));
           }
         }
 

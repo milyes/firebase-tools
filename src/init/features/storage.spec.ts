@@ -2,9 +2,8 @@ import { expect } from "chai";
 import * as _ from "lodash";
 import * as sinon from "sinon";
 
-import { FirebaseError } from "../../error";
 import { Config } from "../../config";
-import { doSetup } from "./storage";
+import { askQuestions, actuate } from "./storage";
 import * as prompt from "../../prompt";
 
 describe("storage", () => {
@@ -13,8 +12,8 @@ describe("storage", () => {
   let promptStub: sinon.SinonStub;
 
   beforeEach(() => {
-    askWriteProjectFileStub = sandbox.stub(Config.prototype, "askWriteProjectFile");
-    promptStub = sandbox.stub(prompt, "promptOnce");
+    askWriteProjectFileStub = sandbox.stub(Config.prototype, "writeProjectFile");
+    promptStub = sandbox.stub(prompt, "input");
   });
 
   afterEach(() => {
@@ -25,29 +24,19 @@ describe("storage", () => {
     it("should set up the correct properties in the project", async () => {
       const setup = {
         config: {},
-        rcfile: {},
+        rcfile: { projects: {}, targets: {}, etags: {} },
         projectId: "my-project-123",
         projectLocation: "us-central",
+        instructions: [],
       };
+      const config = new Config({}, { projectDir: "test", cwd: "test" });
       promptStub.returns("storage.rules");
       askWriteProjectFileStub.resolves();
 
-      await doSetup(setup, new Config("/path/to/src", {}));
+      await askQuestions(setup, config);
+      await actuate(setup, config);
 
       expect(_.get(setup, "config.storage.rules")).to.deep.equal("storage.rules");
-    });
-
-    it("should error when cloud resource location is not set", async () => {
-      const setup = {
-        config: {},
-        rcfile: {},
-        projectId: "my-project-123",
-      };
-
-      await expect(doSetup(setup, new Config("/path/to/src", {}))).to.eventually.be.rejectedWith(
-        FirebaseError,
-        "Cloud resource location is not set",
-      );
     });
   });
 });

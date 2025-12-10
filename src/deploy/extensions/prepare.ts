@@ -20,7 +20,20 @@ import {
 } from "../../extensions/runtimes/common";
 import { Build } from "../functions/build";
 import { getEndpointFilters } from "../functions/functionsDeployHelper";
+import { normalizeAndValidate } from "../../functions/projectConfig";
 import { DeployOptions } from "..";
+
+const matchesInstanceId = (dep: planner.InstanceSpec) => (test: planner.InstanceSpec) => {
+  return dep.instanceId === test.instanceId;
+};
+
+const isUpdate = (dep: planner.InstanceSpec) => (test: planner.InstanceSpec) => {
+  return dep.instanceId === test.instanceId && !refs.equal(dep.ref, test.ref);
+};
+
+const isConfigure = (dep: planner.InstanceSpec) => (test: planner.InstanceSpec) => {
+  return dep.instanceId === test.instanceId && refs.equal(dep.ref, test.ref);
+};
 
 // This is called by prepare and also prepareDynamicExtensions
 async function prepareHelper(
@@ -30,7 +43,7 @@ async function prepareHelper(
   wantExtensions: planner.DeploymentInstanceSpec[],
   haveExtensions: planner.DeploymentInstanceSpec[],
   isDynamic: boolean,
-) {
+): Promise<void> {
   const projectId = needProjectId(options);
 
   context.want = wantExtensions;
@@ -141,14 +154,21 @@ async function prepareHelper(
   }
 }
 
-// This is called by functions/prepare so we can deploy the extensions defined by SDKs
+/**
+ * This is called by functions/prepare so we can deploy the extensions defined by SDKs
+ * @param context The prepare context
+ * @param options The prepare options
+ * @param payload The prepare payload
+ * @param builds firebase functions builds
+ */
 export async function prepareDynamicExtensions(
   context: Context,
   options: DeployOptions,
   payload: Payload,
   builds: Record<string, Build>,
-) {
-  const filters = getEndpointFilters(options);
+): Promise<void> {
+  const functionsConfig = normalizeAndValidate(options.config.src.functions);
+  const filters = getEndpointFilters(options, functionsConfig);
   const extensions = extractExtensionsFromBuilds(builds, filters);
   const projectId = needProjectId(options);
   const projectNumber = await needProjectNumber(options);
@@ -182,7 +202,17 @@ export async function prepareDynamicExtensions(
   );
 }
 
-export async function prepare(context: Context, options: DeployOptions, payload: Payload) {
+/**
+ * static Extensions prepare (not to be confused with dynamic extensions)
+ * @param context The prepare context
+ * @param options The prepare options
+ * @param payload The prepare payload
+ */
+export async function prepare(
+  context: Context,
+  options: DeployOptions,
+  payload: Payload,
+): Promise<void> {
   context.extensionsStartTime = Date.now();
   const projectId = needProjectId(options);
   const projectNumber = await needProjectNumber(options);
@@ -197,7 +227,7 @@ export async function prepare(context: Context, options: DeployOptions, payload:
     projectNumber,
     aliases,
     projectDir,
-    extensions: options.config.get("extensions", {}),
+    extensions: options.config.get("extensions", {}) as Record<string, string>,
   });
 
   const haveExtensions = await planner.have(projectId);
@@ -211,15 +241,3 @@ export async function prepare(context: Context, options: DeployOptions, payload:
     false /* isDynamic */,
   );
 }
-
-const matchesInstanceId = (dep: planner.InstanceSpec) => (test: planner.InstanceSpec) => {
-  return dep.instanceId === test.instanceId;
-};
-
-const isUpdate = (dep: planner.InstanceSpec) => (test: planner.InstanceSpec) => {
-  return dep.instanceId === test.instanceId && !refs.equal(dep.ref, test.ref);
-};
-
-const isConfigure = (dep: planner.InstanceSpec) => (test: planner.InstanceSpec) => {
-  return dep.instanceId === test.instanceId && refs.equal(dep.ref, test.ref);
-};

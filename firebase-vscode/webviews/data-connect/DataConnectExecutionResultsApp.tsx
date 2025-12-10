@@ -1,10 +1,12 @@
 import React from "react";
-import { useBroker } from "../globals/html-broker";
+import { broker, useBroker } from "../globals/html-broker";
 import { Label } from "../components/ui/Text";
 import style from "./data-connect-execution-results.entry.scss";
 import { SerializedError } from "../../common/error";
 import { ExecutionResult, GraphQLError } from "graphql";
 import { isExecutionResult } from "../../common/graphql";
+import { AuthParamsKind } from '../../common/messaging/protocol';
+import { VSCodeButton } from "@vscode/webview-ui-toolkit/react";
 
 // Prevent webpack from removing the `style` import above
 style;
@@ -31,14 +33,10 @@ export function DataConnectExecutionResultsApp() {
     // in case the user wants to see the response anyway.
     response = results.data;
     const errors = results.errors;
-
     if (errors && errors.length !== 0) {
       errorsDisplay = (
         <>
-          <Label>Error</Label>
-          {errors.map((error) => (
-            <GraphQLErrorView error={error} />
-          ))}
+          <GraphQLErrorView errors={errors} />
         </>
       );
     }
@@ -51,30 +49,72 @@ export function DataConnectExecutionResultsApp() {
   let resultsDisplay: JSX.Element | undefined;
   if (response) {
     resultsDisplay = (
+      <code>
+        <label>Result Data</label>
+        <pre>{JSON.stringify(response, null, 2)}</pre>
+      </code>
+    );
+  }
+
+  let variablesDisplay: JSX.Element | undefined;
+  if (
+    dataConnectResults.variables !== "" &&
+    dataConnectResults.variables !== "{}"
+  ) {
+    variablesDisplay = (
       <>
-        <Label>Results</Label>
         <code>
-          <pre>{JSON.stringify(response, null, 2)}</pre>
+          <label>Variables</label>
+          <pre>{dataConnectResults.variables}</pre>
         </code>
+        <br />
       </>
     );
   }
 
+  let authDisplay: JSX.Element | undefined;
+  switch (dataConnectResults.auth.kind) {
+    case AuthParamsKind.ADMIN:
+      // Default is admin.
+      break;
+    case AuthParamsKind.UNAUTHENTICATED:
+      authDisplay = (
+        <>
+          <Label>Unauthenticated</Label>
+          <br />
+        </>
+      );
+      break;
+    case AuthParamsKind.AUTHENTICATED:
+      authDisplay = (
+        <>
+          <code>
+            <label>Auth Claims</label>
+            <pre>{dataConnectResults.auth.claims}</pre>
+          </code>
+          <br />
+        </>
+      );
+      break;
+  }
+
   return (
     <>
+      <h2>
+        <VSCodeButton onClick={() => broker.send("rerunExecution")} appearance="secondary" style={{ transform: "scale(0.8)" }}>
+          <i className="codicon codicon-debug-start"></i>Rerun
+        </VSCodeButton>{" "}
+        {dataConnectResults.displayName}
+      </h2>
+      <br />
       {errorsDisplay}
       {resultsDisplay}
-
-      <Label style={{ textTransform: "capitalize" }}>
-        {dataConnectResults.displayName}
-      </Label>
+      <br />
+      {authDisplay}
+      {variablesDisplay}
       <code>
+        <label>Query</label>
         <pre>{dataConnectResults.query}</pre>
-      </code>
-
-      <Label>Arguments</Label>
-      <code>
-        <pre>{dataConnectResults.args}</pre>
       </code>
     </>
   );
@@ -88,11 +128,7 @@ function InternalErrorView({ error }: { error: SerializedError }) {
     <>
       <Label>Error</Label>
       <p>
-        {
-          // Stacktraces usually already include the message, so we only
-          // display the message if there is no stacktrace.
-          error.stack ? <StackView stack={error.stack} /> : error.message
-        }
+        {error.message}
         {error.cause && (
           <>
             <br />
@@ -106,27 +142,40 @@ function InternalErrorView({ error }: { error: SerializedError }) {
 }
 
 /** A view for when an execution returns status 200 but contains errors. */
-function GraphQLErrorView({ error }: { error: GraphQLError }) {
+function GraphQLErrorView({ errors }: { errors: readonly GraphQLError[] }) {
   let pathDisplay: JSX.Element | undefined;
-  if (error.path) {
-    // Renders the path as a series of kbd elements separated by commas
-    pathDisplay = (
-      <>
-        {error.path?.map((path, index) => {
-          const item = <kbd>{path}</kbd>;
+  // update path
+  const errorsWithPathDisplay = errors.map((error) => {
+    if (error.path) {
+      // Renders the path as a series of kbd elements separated by commas
+      return {
+        ...error,
+        pathDisplay: (
+          <>
+            {error.path?.map((path, index) => {
+              const item = <kbd>{path}</kbd>;
 
-          return index === 0 ? item : <>, {item}</>;
-        })}{" "}
-      </>
-    );
-  }
+              return index === 0 ? item : <>, {item}</>;
+            })}{" "}
+          </>
+        ),
+      };
+    }
+    return error;
+  });
 
   return (
-    <p style={{ whiteSpace: "pre-wrap" }}>
-      {pathDisplay}
-      {error.message}
-      {error.stack && <StackView stack={error.stack} />}
-    </p>
+    <>
+      {errorsWithPathDisplay.map((error, index) => {
+        return (
+          <p style={{ whiteSpace: "pre-wrap" }}  key={index}>
+            {pathDisplay}
+            {error.message}
+            {error.stack && <StackView stack={error.stack} />}
+          </p>
+        );
+      })}
+    </>
   );
 }
 
